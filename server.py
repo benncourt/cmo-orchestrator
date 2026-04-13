@@ -39,6 +39,53 @@ def set_agent(agent, status, action="", progress=0):
     with lock:
         state["agents"][agent] = {"status": status, "last_action": action, "progress": progress}
 
+def poll_until_done(session_id):
+    """Espera polling hasta que session.status_idle aparezca, luego retorna el output."""
+    log("cmo_orchestrator", "Esperando respuesta del agente...")
+    max_wait = 600  # 10 minutos máximo
+    interval = 5    # revisar cada 5 segundos
+    elapsed = 0
+
+    while elapsed < max_wait:
+        time.sleep(interval)
+        elapsed += interval
+
+        try:
+            r = httpx.get(f"{BASE_URL}/sessions/{session_id}/events", headers=HEADERS, timeout=30)
+            if r.status_code != 200:
+                continue
+
+            data = r.json().get("data", [])
+            
+            # Buscar si ya terminó
+            idle = any(e.get("type") == "session.status_idle" for e in data)
+            error = next((e for e in data if e.get("type") == "session.error"), None)
+            
+            if error:
+                raise Exception(f"Error del agente: {error.get('message','error desconocido')}")
+
+            # Actualizar progreso visual
+            progress = min(20 + (elapsed // 5) * 3, 90)
+            set_agent("cmo_orchestrator", "running", f"Pensando... ({elapsed}s)", progress)
+            with lock: state["token_cost"] += 0.001
+
+            if idle:
+                # Extraer output de agent.message
+                parts = []
+                for evt in data:
+                    if evt.get("type") == "agent.message":
+                        for block in evt.get("content", []):
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                txt = block.get("text", "")
+                                if txt:
+                                    parts.append(txt)
+                return "".join(parts)
+
+        except httpx.RequestError:
+            continue
+
+    return ""
+
 def run(task, agent_id, env_id):
     with lock:
         state.update({"session_active": True, "current_output": "", "last_error": "",
@@ -55,9 +102,9 @@ def run(task, agent_id, env_id):
             raise Exception(f"Error creando sesión {r.status_code}: {r.text[:300]}")
         session_id = r.json()["id"]
         log("cmo_orchestrator", f"Sesión: {session_id}")
-        set_agent("cmo_orchestrator", "running", "Sesión lista...", 20)
+        set_agent("cmo_orchestrator", "running", "Sesión lista...", 15)
 
-        # 2. Mandar mensaje — formato exacto de la documentación oficial
+        # 2. Mandar mensaje
         ev = httpx.post(f"{BASE_URL}/sessions/{session_id}/events", headers=HEADERS, json={
             "events": [{
                 "type": "user.message",
@@ -66,74 +113,17 @@ def run(task, agent_id, env_id):
         }, timeout=30)
         if ev.status_code != 200:
             raise Exception(f"Error enviando mensaje {ev.status_code}: {ev.text[:300]}")
-        log("cmo_orchestrator", "Agente trabajando...")
-        set_agent("cmo_orchestrator", "running", "Procesando...", 30)
+        log("cmo_orchestrator", "Agente procesando tarea...")
+        set_agent("cmo_orchestrator", "running", "Agente pensando...", 20)
 
-        # 3. Leer stream — /sessions/{id}/stream con Accept: text/event-stream
-        parts = []
-        with httpx.stream("GET", f"{BASE_URL}/sessions/{session_id}/stream",
-            headers={**HEADERS, "accept": "text/event-stream"}, timeout=600) as resp:
-            for line in resp.iter_lines():
-                if not line or line.startswith(":"): continue
-                if not line.startswith("data: "): continue
-                s = line[6:]
-                if s == "[DONE]": break
-                try:
-                    e = json.loads(s)
-                    t = e.get("type", "")
-
-                    # Output del agente — formato: agent.message con content[].text
-                    if t == "agent.message":
-                        for block in e.get("content", []):
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                txt = block.get("text", "")
-                                if txt:
-                                    parts.append(txt)
-                                    with lock:
-                                        state["current_output"] = "".join(parts)
-
-                    # Tools usados
-                    elif t == "agent.tool_use":
-                        name = e.get("name", "tool")
-                        inp = e.get("input", {})
-                        if name == "web_search": msg = f"Buscando: {str(inp.get('query',''))[:45]}"
-                        elif name == "web_fetch": msg = f"Leyendo: {str(inp.get('url',''))[:45]}"
-                        else: msg = f"Tool: {name}"
-                        log("cmo_orchestrator", msg)
-                        set_agent("cmo_orchestrator", "running", msg[:35], 60)
-                        with lock: state["token_cost"] += 0.0005
-
-                    # Agente terminó
-                    elif t == "session.status_idle":
-                        log("cmo_orchestrator", "Agente terminó", "success")
-                        break
-
-                    # Error
-                    elif t == "session.error":
-                        raise Exception(f"Error: {e.get('message', str(e))}")
-
-                except json.JSONDecodeError:
-                    pass
-
-        # Si no hubo output en el stream, leer eventos guardados via GET
-        if not parts:
-            log("cmo_orchestrator", "Leyendo resultado desde eventos guardados...")
-            r2 = httpx.get(f"{BASE_URL}/sessions/{session_id}/events", headers=HEADERS, timeout=30)
-            if r2.status_code == 200:
-                data = r2.json()
-                for evt in data.get("data", []):
-                    if evt.get("type") == "agent.message":
-                        for block in evt.get("content", []):
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                txt = block.get("text", "")
-                                if txt:
-                                    parts.append(txt)
-                with lock:
-                    state["current_output"] = "".join(parts)
+        # 3. Polling hasta que termine
+        output = poll_until_done(session_id)
 
         with lock:
+            state["current_output"] = output if output else "El agente completó pero no generó texto visible."
             state["tasks_done"] += 1
             state["session_active"] = False
+
         set_agent("cmo_orchestrator", "done", "Completado ✓", 100)
         log("cmo_orchestrator", "Completado exitosamente", "success")
 
