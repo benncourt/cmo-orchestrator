@@ -48,7 +48,7 @@ def run(task, agent_id, env_id):
         r = httpx.post(f"{BASE_URL}/sessions", headers=HEADERS, json={
             "agent": agent_id,
             "environment_id": env_id,
-            "initial_message": task,
+            "messages": [{"role": "user", "content": task}],
         }, timeout=30)
         if r.status_code != 200:
             raise Exception(f"Error {r.status_code}: {r.text[:400]}")
