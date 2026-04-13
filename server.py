@@ -52,12 +52,12 @@ def run(task, agent_id, env_id):
             "environment_id": env_id,
         }, timeout=30)
         if r.status_code != 200:
-            raise Exception(f"Error creando sesión {r.status_code}: {r.text[:400]}")
+            raise Exception(f"Error creando sesión {r.status_code}: {r.text[:300]}")
         session_id = r.json()["id"]
-        log("cmo_orchestrator", f"Sesión creada: {session_id}")
-        set_agent("cmo_orchestrator", "running", "Enviando tarea...", 20)
+        log("cmo_orchestrator", f"Sesión: {session_id}")
+        set_agent("cmo_orchestrator", "running", "Sesión lista...", 20)
 
-        # 2. Enviar mensaje como evento
+        # 2. Mandar mensaje — formato exacto de la documentación oficial
         ev = httpx.post(f"{BASE_URL}/sessions/{session_id}/events", headers=HEADERS, json={
             "events": [{
                 "type": "user.message",
@@ -65,11 +65,11 @@ def run(task, agent_id, env_id):
             }]
         }, timeout=30)
         if ev.status_code != 200:
-            raise Exception(f"Error enviando evento {ev.status_code}: {ev.text[:400]}")
-        log("cmo_orchestrator", "Mensaje enviado, agente trabajando...")
-        set_agent("cmo_orchestrator", "running", "Agente trabajando...", 30)
+            raise Exception(f"Error enviando mensaje {ev.status_code}: {ev.text[:300]}")
+        log("cmo_orchestrator", "Agente trabajando...")
+        set_agent("cmo_orchestrator", "running", "Procesando...", 30)
 
-        # 3. Leer stream desde /sessions/{id}/stream
+        # 3. Leer stream — /sessions/{id}/stream con Accept: text/event-stream
         parts = []
         with httpx.stream("GET", f"{BASE_URL}/sessions/{session_id}/stream",
             headers={**HEADERS, "accept": "text/event-stream"}, timeout=600) as resp:
@@ -82,35 +82,59 @@ def run(task, agent_id, env_id):
                     e = json.loads(s)
                     t = e.get("type", "")
 
+                    # Output del agente — formato: agent.message con content[].text
                     if t == "agent.message":
                         for block in e.get("content", []):
-                            if block.get("type") == "text":
-                                parts.append(block["text"])
-                                with lock: state["current_output"] = "".join(parts)
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                txt = block.get("text", "")
+                                if txt:
+                                    parts.append(txt)
+                                    with lock:
+                                        state["current_output"] = "".join(parts)
 
+                    # Tools usados
                     elif t == "agent.tool_use":
                         name = e.get("name", "tool")
                         inp = e.get("input", {})
-                        if name == "web_search": msg = f"Buscando: {inp.get('query','')[:45]}"
-                        elif name == "web_fetch": msg = f"Leyendo: {inp.get('url','')[:45]}"
+                        if name == "web_search": msg = f"Buscando: {str(inp.get('query',''))[:45]}"
+                        elif name == "web_fetch": msg = f"Leyendo: {str(inp.get('url',''))[:45]}"
                         else: msg = f"Tool: {name}"
                         log("cmo_orchestrator", msg)
-                        set_agent("cmo_orchestrator", "running", msg[:35], 55)
+                        set_agent("cmo_orchestrator", "running", msg[:35], 60)
                         with lock: state["token_cost"] += 0.0005
 
+                    # Agente terminó
                     elif t == "session.status_idle":
                         log("cmo_orchestrator", "Agente terminó", "success")
                         break
 
-                    elif t == "session.status_error":
-                        raise Exception(f"Error de sesión: {e.get('message','error desconocido')}")
+                    # Error
+                    elif t == "session.error":
+                        raise Exception(f"Error: {e.get('message', str(e))}")
 
-                except json.JSONDecodeError: pass
+                except json.JSONDecodeError:
+                    pass
+
+        # Si no hubo output en el stream, leer eventos guardados via GET
+        if not parts:
+            log("cmo_orchestrator", "Leyendo resultado desde eventos guardados...")
+            r2 = httpx.get(f"{BASE_URL}/sessions/{session_id}/events", headers=HEADERS, timeout=30)
+            if r2.status_code == 200:
+                data = r2.json()
+                for evt in data.get("data", []):
+                    if evt.get("type") == "agent.message":
+                        for block in evt.get("content", []):
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                txt = block.get("text", "")
+                                if txt:
+                                    parts.append(txt)
+                with lock:
+                    state["current_output"] = "".join(parts)
 
         with lock:
             state["tasks_done"] += 1
             state["session_active"] = False
-        set_agent("cmo_orchestrator", "done", "Tarea completada ✓", 100)
+        set_agent("cmo_orchestrator", "done", "Completado ✓", 100)
         log("cmo_orchestrator", "Completado exitosamente", "success")
 
     except Exception as ex:
@@ -168,7 +192,7 @@ class H(BaseHTTPRequestHandler):
             aid = ids.get("AGENT_cmo_orchestrator")
             eid = ids.get("environment_id")
             if not aid:
-                self.respond({"error": "No encontré AGENT_IDS en variables de Railway"}); return
+                self.respond({"error": "No encontré AGENT_IDS"}); return
             threading.Thread(target=run, args=(task, aid, eid), daemon=True).start()
             self.respond({"ok": True})
         else:
@@ -185,7 +209,6 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8765))
     srv = HTTPServer(("0.0.0.0", PORT), H)
     print(f"✅ CMO Dashboard Server corriendo en puerto {PORT}")
-    print("   Abre dashboard.html en Chrome para ver el dashboard")
     print("   Ctrl+C para detener\n")
     try: srv.serve_forever()
     except KeyboardInterrupt: print("\n👋 Servidor detenido")
