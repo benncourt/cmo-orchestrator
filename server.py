@@ -51,6 +51,12 @@ sse_lock = threading.Lock()
 
 
 def load_agent_ids():
+    agent_ids_env = os.environ.get("AGENT_IDS")
+    if agent_ids_env:
+        try:
+            return json.loads(agent_ids_env)
+        except json.JSONDecodeError:
+            pass
     try:
         with open("agent_ids.json") as f:
             return json.load(f)
