@@ -41,30 +41,37 @@ def set_agent(agent, status, action="", progress=0):
 
 def run(task, agent_id, env_id):
     with lock:
-        state.update({"session_active": True, "current_output": "", "last_error": "", "agents": {}, "logs": [], "runtime_secs": 0, "token_cost": 0.0})
+        state.update({"session_active": True, "current_output": "", "last_error": "",
+                      "agents": {}, "logs": [], "runtime_secs": 0, "token_cost": 0.0})
     set_agent("cmo_orchestrator", "running", "Iniciando...", 10)
-    log("cmo_orchestrator", f"Tarea recibida: {task[:80]}...")
+    log("cmo_orchestrator", f"Tarea: {task[:80]}...")
     try:
+        # 1. Crear sesión
         r = httpx.post(f"{BASE_URL}/sessions", headers=HEADERS, json={
-            "agent_id": agent_id,
+            "agent": agent_id,
             "environment_id": env_id,
         }, timeout=30)
         if r.status_code != 200:
             raise Exception(f"Error creando sesión {r.status_code}: {r.text[:400]}")
         session_id = r.json()["id"]
-        log("cmo_orchestrator", f"Sesión: {session_id}")
+        log("cmo_orchestrator", f"Sesión creada: {session_id}")
         set_agent("cmo_orchestrator", "running", "Enviando tarea...", 20)
 
-        # Enviar el mensaje como evento
+        # 2. Enviar mensaje como evento
         ev = httpx.post(f"{BASE_URL}/sessions/{session_id}/events", headers=HEADERS, json={
-            "type": "user",
-            "content": task,
+            "events": [{
+                "type": "user.message",
+                "content": [{"type": "text", "text": task}]
+            }]
         }, timeout=30)
         if ev.status_code != 200:
             raise Exception(f"Error enviando evento {ev.status_code}: {ev.text[:400]}")
-        set_agent("cmo_orchestrator", "running", "Sesión activa...", 25)
+        log("cmo_orchestrator", "Mensaje enviado, agente trabajando...")
+        set_agent("cmo_orchestrator", "running", "Agente trabajando...", 30)
+
+        # 3. Leer stream desde /sessions/{id}/stream
         parts = []
-        with httpx.stream("GET", f"{BASE_URL}/sessions/{session_id}/events/stream",
+        with httpx.stream("GET", f"{BASE_URL}/sessions/{session_id}/stream",
             headers={**HEADERS, "accept": "text/event-stream"}, timeout=600) as resp:
             for line in resp.iter_lines():
                 if not line or line.startswith(":"): continue
@@ -73,34 +80,39 @@ def run(task, agent_id, env_id):
                 if s == "[DONE]": break
                 try:
                     e = json.loads(s)
-                    t = e.get("type","")
-                    if t == "text_delta":
-                        d = e.get("delta","")
-                        parts.append(d)
-                        with lock: state["current_output"] = "".join(parts)
-                    elif t == "agent_start":
-                        n = e.get("agent_name","sub_agent")
-                        log(n, "Iniciando..."); set_agent(n, "running", "Trabajando...", 20)
-                    elif t == "agent_complete":
-                        n = e.get("agent_name","sub_agent")
-                        log(n, "Completado", "success"); set_agent(n, "done", "Completado ✓", 100)
-                    elif t == "tool_use":
-                        a = e.get("agent_name","cmo_orchestrator")
-                        tool = e.get("tool_name","")
-                        inp = e.get("input",{})
-                        if tool == "web_search": msg = f"Buscando: {inp.get('query','')[:45]}"
-                        elif tool == "web_fetch": msg = f"Leyendo: {inp.get('url','')[:45]}"
-                        else: msg = f"Tool: {tool}"
-                        log(a, msg); set_agent(a, "running", msg[:35], 55)
+                    t = e.get("type", "")
+
+                    if t == "agent.message":
+                        for block in e.get("content", []):
+                            if block.get("type") == "text":
+                                parts.append(block["text"])
+                                with lock: state["current_output"] = "".join(parts)
+
+                    elif t == "agent.tool_use":
+                        name = e.get("name", "tool")
+                        inp = e.get("input", {})
+                        if name == "web_search": msg = f"Buscando: {inp.get('query','')[:45]}"
+                        elif name == "web_fetch": msg = f"Leyendo: {inp.get('url','')[:45]}"
+                        else: msg = f"Tool: {name}"
+                        log("cmo_orchestrator", msg)
+                        set_agent("cmo_orchestrator", "running", msg[:35], 55)
                         with lock: state["token_cost"] += 0.0005
-                    elif t == "error":
-                        log("cmo_orchestrator", e.get("message","error"), "error")
-                except: pass
+
+                    elif t == "session.status_idle":
+                        log("cmo_orchestrator", "Agente terminó", "success")
+                        break
+
+                    elif t == "session.status_error":
+                        raise Exception(f"Error de sesión: {e.get('message','error desconocido')}")
+
+                except json.JSONDecodeError: pass
+
         with lock:
             state["tasks_done"] += 1
             state["session_active"] = False
         set_agent("cmo_orchestrator", "done", "Tarea completada ✓", 100)
         log("cmo_orchestrator", "Completado exitosamente", "success")
+
     except Exception as ex:
         err = str(ex)
         with lock:
@@ -118,54 +130,54 @@ def ticker():
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def cors(self):
-        self.send_header("Access-Control-Allow-Origin","*")
-        self.send_header("Access-Control-Allow-Methods","GET,POST,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers","Content-Type")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
     def do_OPTIONS(self):
         self.send_response(200); self.cors(); self.end_headers()
     def do_GET(self):
         p = urlparse(self.path).path
-        if p in ("/","/dashboard"):
+        if p in ("/", "/dashboard"):
             try:
-                c = open("dashboard.html","rb").read()
+                c = open("dashboard.html", "rb").read()
                 self.send_response(200)
-                self.send_header("Content-Type","text/html; charset=utf-8")
-                self.send_header("Content-Length",str(len(c)))
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(c)))
                 self.cors(); self.end_headers(); self.wfile.write(c)
             except:
                 self.send_response(404); self.end_headers()
         elif p == "/state":
             with lock: d = json.dumps(state).encode()
             self.send_response(200)
-            self.send_header("Content-Type","application/json")
-            self.send_header("Content-Length",str(len(d)))
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(d)))
             self.cors(); self.end_headers(); self.wfile.write(d)
         else:
             self.send_response(404); self.end_headers()
     def do_POST(self):
         p = urlparse(self.path).path
-        n = int(self.headers.get("Content-Length",0))
+        n = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(n)) if n else {}
         if p == "/task":
-            task = body.get("task","").strip()
+            task = body.get("task", "").strip()
             if not task:
-                self.respond({"error":"Tarea vacía"},400); return
+                self.respond({"error": "Tarea vacía"}, 400); return
             if state["session_active"]:
-                self.respond({"error":"Sesión activa, espera"}); return
+                self.respond({"error": "Sesión activa, espera"}); return
             ids = load_ids()
             aid = ids.get("AGENT_cmo_orchestrator")
             eid = ids.get("environment_id")
             if not aid:
-                self.respond({"error":"No encontré agent_ids. Verifica la variable AGENT_IDS en Railway."}); return
-            threading.Thread(target=run, args=(task,aid,eid), daemon=True).start()
-            self.respond({"ok":True})
+                self.respond({"error": "No encontré AGENT_IDS en variables de Railway"}); return
+            threading.Thread(target=run, args=(task, aid, eid), daemon=True).start()
+            self.respond({"ok": True})
         else:
             self.send_response(404); self.end_headers()
     def respond(self, data, status=200):
         b = json.dumps(data).encode()
         self.send_response(status)
-        self.send_header("Content-Type","application/json")
-        self.send_header("Content-Length",str(len(b)))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
         self.cors(); self.end_headers(); self.wfile.write(b)
 
 if __name__ == "__main__":
