@@ -101,7 +101,7 @@ def set_agent_status(agent_id: str, status: str, action: str = "", progress: int
         "progress": progress,
     }
     broadcast("agent_update", {
-        "agent_id": agent_id,
+        "agent": agent_id,
         "status": status,
         "last_action": action,
         "progress": progress,
@@ -125,7 +125,7 @@ def run_session(task: str, agent_id: str, environment_id: str):
             f"{BASE_URL}/sessions",
             headers=HEADERS,
             json={
-                "agent_id": agent_id,
+                "agent": agent_id,
                 "environment_id": environment_id,
                 "initial_message": task,
             },
