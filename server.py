@@ -46,14 +46,22 @@ def run(task, agent_id, env_id):
     log("cmo_orchestrator", f"Tarea recibida: {task[:80]}...")
     try:
         r = httpx.post(f"{BASE_URL}/sessions", headers=HEADERS, json={
-            "agent": agent_id,
+            "agent_id": agent_id,
             "environment_id": env_id,
-            "messages": [{"role": "user", "content": task}],
         }, timeout=30)
         if r.status_code != 200:
-            raise Exception(f"Error {r.status_code}: {r.text[:400]}")
+            raise Exception(f"Error creando sesión {r.status_code}: {r.text[:400]}")
         session_id = r.json()["id"]
         log("cmo_orchestrator", f"Sesión: {session_id}")
+        set_agent("cmo_orchestrator", "running", "Enviando tarea...", 20)
+
+        # Enviar el mensaje como evento
+        ev = httpx.post(f"{BASE_URL}/sessions/{session_id}/events", headers=HEADERS, json={
+            "type": "user",
+            "content": task,
+        }, timeout=30)
+        if ev.status_code != 200:
+            raise Exception(f"Error enviando evento {ev.status_code}: {ev.text[:400]}")
         set_agent("cmo_orchestrator", "running", "Sesión activa...", 25)
         parts = []
         with httpx.stream("GET", f"{BASE_URL}/sessions/{session_id}/events/stream",
