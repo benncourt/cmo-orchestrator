@@ -118,71 +118,126 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 <script>
 const SERVER = window.location.origin;
+const AGENTS=[
+  {id:'cmo_orchestrator',name:'CMO Orchestrator',icon:'🎯',color:'#6C63FF'},
+  {id:'customer_research',name:'Customer Research',icon:'🔬',color:'#10B981'},
+  {id:'competitor_intel',name:'Competitor Intel',icon:'🕵️',color:'#3B82F6'},
+  {id:'trend_spotter',name:'Trend Spotter',icon:'📈',color:'#F59E0B'},
+  {id:'copywriter',name:'Copywriter',icon:'✍️',color:'#EC4899'},
+  {id:'copy_editor',name:'Copy Editor',icon:'✏️',color:'#8B5CF6'},
+  {id:'content_strategist',name:'Content Strategist',icon:'📅',color:'#059669'},
+  {id:'paid_ads',name:'Paid Ads',icon:'📢',color:'#EF4444'},
+  {id:'email_sequence',name:'Email Sequence',icon:'📧',color:'#2563EB'},
+  {id:'seo_auditor',name:'SEO Auditor',icon:'🔍',color:'#16A34A'},
+  {id:'marketing_ideas',name:'Marketing Ideas',icon:'💡',color:'#D97706'},
+  {id:'pricing_strategy',name:'Pricing Strategy',icon:'💰',color:'#B45309'},
+  {id:'cro_auditor',name:'CRO Auditor',icon:'⚡',color:'#DC2626'}
+];
+let state={},timerInterval=null,lastLogCount=0,outputText='',prevActive=false;
+AGENTS.forEach(a=>state[a.id]={status:'idle',action:'',progress:0});
 
-const AGENTS=[{id:"cmo_orchestrator",name:"CMO Orchestrator",icon:"🎯",color:"#6C63FF"},{id:"customer_research",name:"Customer Research",icon:"🔬",color:"#10B981"},{id:"competitor_intel",name:"Competitor Intel",icon:"🕵️",color:"#3B82F6"},{id:"trend_spotter",name:"Trend Spotter",icon:"📈",color:"#F59E0B"},{id:"copywriter",name:"Copywriter",icon:"✍️",color:"#EC4899"},{id:"copy_editor",name:"Copy Editor",icon:"✏️",color:"#8B5CF6"},{id:"content_strategist",name:"Content Strategist",icon:"📅",color:"#059669"},{id:"paid_ads",name:"Paid Ads",icon:"📢",color:"#EF4444"},{id:"email_sequence",name:"Email Sequence",icon:"📧",color:"#2563EB"},{id:"seo_auditor",name:"SEO Auditor",icon:"🔍",color:"#16A34A"},{id:"marketing_ideas",name:"Marketing Ideas",icon:"💡",color:"#D97706"},{id:"pricing_strategy",name:"Pricing Strategy",icon:"💰",color:"#B45309"},{id:"cro_auditor",name:"CRO Auditor",icon:"⚡",color:"#DC2626"}];
-let state={},runtimeSecs=0,tokenCost=0,tasksDone=0,outputText="",timerInterval=null;
-AGENTS.forEach(a=>state[a.id]={status:"idle",action:"",progress:0});
+function renderAgents(){
+  const g=document.getElementById('agents-grid');
+  g.innerHTML=AGENTS.map(a=>{
+    const s=state[a.id];
+    const cls=s.status!=='idle'?s.status:'';
+    const bc={idle:'sb-idle',running:'sb-running',done:'sb-done',error:'sb-error'}[s.status];
+    const bt={idle:'En espera',running:'Trabajando',done:'Listo ✓',error:'Error'}[s.status];
+    const p=s.status==='done'?100:s.status==='running'?(s.progress||40):0;
+    return '<div class="agent-card '+cls+'"><div class="agent-top"><div class="agent-icon">'+a.icon+'</div><span class="sbadge '+bc+'">'+bt+'</span></div><div class="agent-name">'+a.name+'</div><div class="agent-action">'+(s.action||'—')+'</div><div class="prog-track"><div class="prog-fill" style="width:'+p+'%;background:'+a.color+'"></div></div></div>';
+  }).join('');
+}
 
-function renderAgents(){const g=document.getElementById("agents-grid");g.innerHTML=AGENTS.map(a=>{const s=state[a.id];const cls=s.status!=="idle"?s.status:"";const bc={idle:"sb-idle",running:"sb-running",done:"sb-done",error:"sb-error"}[s.status];const bt={idle:"En espera",running:"Trabajando",done:"Listo ✓",error:"Error"}[s.status];const p=s.status==="done"?100:s.status==="running"?(s.progress||40):0;return`<div class="agent-card ${cls}"><div class="agent-top"><div class="agent-icon">${a.icon}</div><span class="sbadge ${bc}">${bt}</span></div><div class="agent-name">${a.name}</div><div class="agent-action">${s.action||"—"}</div><div class="prog-track"><div class="prog-fill" style="width:${p}%;background:${a.color}"></div></div></div>`;}).join("");}
+function addLog(id,msg,level){
+  if(!msg)return;
+  const list=document.getElementById('log-list');
+  const now=new Date();
+  const t=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0')+':'+now.getSeconds().toString().padStart(2,'0');
+  const a=AGENTS.find(x=>x.id===id);
+  const el=document.createElement('div');
+  el.className='log-entry';
+  el.innerHTML='<div class="log-time">'+t+'</div><div class="log-agent">'+(a?a.name:id)+'</div><div class="log-msg '+(level||'')+'">'+msg+'</div>';
+  list.appendChild(el);
+  list.scrollTop=list.scrollHeight;
+  if(list.children.length>200)list.removeChild(list.firstChild);
+}
 
-function addLog(id,msg,level=""){const list=document.getElementById("log-list");const now=new Date();const t=`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}:${now.getSeconds().toString().padStart(2,"0")}`;const a=AGENTS.find(x=>x.id===id);const el=document.createElement("div");el.className="log-entry";el.innerHTML=`<div class="log-time">${t}</div><div class="log-agent">${a?a.name:id}</div><div class="log-msg ${level}">${msg}</div>`;list.appendChild(el);list.scrollTop=list.scrollHeight;if(list.children.length>200)list.removeChild(list.firstChild);}
+function setConnected(ok){
+  const pill=document.querySelector('.conn-pill');
+  const dot=document.querySelector('.conn-dot');
+  const span=pill.querySelector('span');
+  if(ok){pill.style.background='#ECFDF5';pill.style.color='#059669';pill.style.borderColor='#A7F3D0';dot.style.background='#10B981';span.textContent='En línea';}
+  else{pill.style.background='#FEF2F2';pill.style.color='#DC2626';pill.style.borderColor='#FCA5A5';dot.style.background='#DC2626';span.textContent='Reconectando...';}
+}
 
-function updateMetrics(){const active=Object.values(state).filter(s=>s.status==="running").length;document.getElementById("m-active").textContent=active;document.getElementById("m-done").textContent=tasksDone;const rt=runtimeSecs*0.08/3600;const total=rt+tokenCost;document.getElementById("m-cost").textContent="$"+total.toFixed(4);document.getElementById("c-runtime").textContent="$"+rt.toFixed(4);document.getElementById("c-tokens").textContent="$"+tokenCost.toFixed(4);document.getElementById("c-total").textContent="$"+total.toFixed(4);}
-
-function appendOutput(delta){const el=document.getElementById("output-body");if(outputText===""){el.style.color="#374151";el.innerHTML="";}outputText+=delta;el.innerHTML=outputText+"<span class=cursor></span>";el.scrollTop=el.scrollHeight;}
-
-function connect(){
-  const es=new EventSource(SERVER+"/events");
-  es.addEventListener("init",e=>{
-    const d=JSON.parse(e.data);
-    if(d.agents)Object.assign(state,d.agents);
-    if(d.logs)d.logs.forEach(l=>addLog(l.agent,l.message,l.level));
-    tasksDone=d.tasks_done||0;tokenCost=d.token_cost||0;
-    renderAgents();updateMetrics();
-  });
-  es.addEventListener("agent_update",e=>{const d=JSON.parse(e.data);state[d.agent_id]={status:d.status,action:d.last_action,progress:d.progress};renderAgents();updateMetrics();});
-  es.addEventListener("log",e=>{const d=JSON.parse(e.data);addLog(d.agent,d.message,d.level);});
-  es.addEventListener("output_delta",e=>{appendOutput(JSON.parse(e.data).delta);});
-  es.addEventListener("session_start",e=>{
-    outputText="";document.getElementById("output-body").innerHTML="<span class=cursor></span>";
-    document.getElementById("out-status").textContent="generando...";
-    runtimeSecs=0;const start=Date.now();
-    timerInterval=setInterval(()=>{runtimeSecs++;const s=Math.floor((Date.now()-start)/1000);document.getElementById("m-time").textContent=`${Math.floor(s/60)}:${(s%60).toString().padStart(2,"0")}`;document.getElementById("m-time-sub").textContent="sesión activa";updateMetrics();},1000);
-    document.getElementById("btn-send").disabled=true;
-  });
-  es.addEventListener("session_complete",e=>{
-    const d=JSON.parse(e.data);clearInterval(timerInterval);tasksDone=d.tasks_done;
-    document.getElementById("m-done").textContent=tasksDone;
-    document.getElementById("m-time-sub").textContent="completada";
-    document.getElementById("out-status").textContent="completado ✓";
-    document.getElementById("btn-send").disabled=false;renderAgents();
-  });
-  es.addEventListener("session_error",e=>{
-    const d=JSON.parse(e.data);clearInterval(timerInterval);
-    addLog("cmo_orchestrator",d.message,"error");
-    document.getElementById("btn-send").disabled=false;
-    document.getElementById("out-status").textContent="error";
-  });
-  es.addEventListener("cost_update",e=>{const d=JSON.parse(e.data);tokenCost=d.token_cost;runtimeSecs=d.runtime_secs;updateMetrics();});
-  es.addEventListener("reset",()=>{AGENTS.forEach(a=>state[a.id]={status:"idle",action:"",progress:0});renderAgents();document.getElementById("log-list").innerHTML="";});
-  es.onerror=()=>setTimeout(connect,3000);
+async function poll(){
+  try{
+    const r=await fetch(SERVER+'/state');
+    if(!r.ok)throw new Error();
+    const d=await r.json();
+    setConnected(true);
+    if(d.agents){Object.keys(d.agents).forEach(k=>{if(state[k])state[k]=d.agents[k];});renderAgents();}
+    document.getElementById('m-active').textContent=Object.values(state).filter(s=>s.status==='running').length;
+    document.getElementById('m-done').textContent=d.tasks_done||0;
+    const rt=(d.runtime_secs||0)*0.08/3600;
+    const total=rt+(d.token_cost||0);
+    document.getElementById('m-cost').textContent='$'+total.toFixed(4);
+    document.getElementById('c-runtime').textContent='$'+rt.toFixed(4);
+    document.getElementById('c-tokens').textContent='$'+(d.token_cost||0).toFixed(4);
+    document.getElementById('c-total').textContent='$'+total.toFixed(4);
+    if(d.current_output&&d.current_output!==outputText){
+      outputText=d.current_output;
+      const el=document.getElementById('output-body');
+      el.style.color='#374151';
+      el.innerHTML=outputText+(d.session_active?'<span class=cursor></span>':'');
+      el.scrollTop=el.scrollHeight;
+    }
+    if(d.logs&&d.logs.length>lastLogCount){
+      d.logs.slice(lastLogCount).forEach(l=>addLog(l.agent,l.message,l.level));
+      lastLogCount=d.logs.length;
+    }
+    if(d.session_active){
+      document.getElementById('out-status').textContent='generando...';
+      document.getElementById('btn-send').disabled=true;
+      if(!timerInterval){
+        const startMs=Date.now()-(d.runtime_secs||0)*1000;
+        timerInterval=setInterval(()=>{
+          const s=Math.floor((Date.now()-startMs)/1000);
+          document.getElementById('m-time').textContent=Math.floor(s/60)+':'+(s%60).toString().padStart(2,'0');
+          document.getElementById('m-time-sub').textContent='sesión activa';
+        },1000);
+      }
+      prevActive=true;
+    }else{
+      if(prevActive){clearInterval(timerInterval);timerInterval=null;document.getElementById('m-time-sub').textContent='completada';}
+      document.getElementById('btn-send').disabled=false;
+      if(d.tasks_done>0)document.getElementById('out-status').textContent='completado ✓';
+      prevActive=false;
+    }
+  }catch(e){setConnected(false);}
 }
 
 async function sendTask(){
-  const input=document.getElementById("task-input");
+  const input=document.getElementById('task-input');
   const task=input.value.trim();
   if(!task)return;
+  lastLogCount=0;outputText='';
+  document.getElementById('output-body').innerHTML='<span class=cursor></span>';
+  document.getElementById('log-list').innerHTML='';
+  AGENTS.forEach(a=>state[a.id]={status:'idle',action:'',progress:0});
+  renderAgents();
   try{
-    const r=await fetch(SERVER+"/task",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task})});
+    const r=await fetch(SERVER+'/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task})});
     const d=await r.json();
-    if(d.error)addLog("cmo_orchestrator",d.error,"error");
-    else input.value="";
-  }catch(e){addLog("cmo_orchestrator","Error conectando al servidor","error");}
+    if(d.error)addLog('cmo_orchestrator',d.error,'error');
+    else{input.value='';addLog('cmo_orchestrator','Sesión iniciada — agentes trabajando...');}
+  }catch(e){addLog('cmo_orchestrator','Error conectando al servidor','error');}
 }
 
 renderAgents();
-connect();
-addLog("cmo_orchestrator","Conectando al servidor...");
+setConnected(false);
+poll();
+setInterval(poll,2000);
 </script>
 </body>
 </html>
